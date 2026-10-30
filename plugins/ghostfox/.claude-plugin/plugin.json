@@ -1,0 +1,18 @@
+{
+  "name": "ghostfox",
+  "version": "0.1.0",
+  "description": "A headless Firefox for Claude, logged in wherever your everyday Firefox is: cookies and localStorage are copied from your main profile into an agent profile before each launch.",
+  "author": {
+    "name": "mihazip",
+    "url": "https://github.com/mihazip"
+  },
+  "homepage": "https://github.com/mihazip/hyperfocus",
+  "repository": "https://github.com/mihazip/hyperfocus",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "firefox",
+    "browser",
+    "headless"
+  ]
+}
