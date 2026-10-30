@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ghostfox": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/ghostfox.mjs"]
+    }
+  }
+}

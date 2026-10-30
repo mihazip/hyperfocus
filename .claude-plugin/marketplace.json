@@ -17,6 +17,11 @@
       "name": "tangent",
       "source": "./plugins/tangent",
       "description": "Ask a question between || pipes || (or your own delimiters) mid-sentence; the answer is written back into your draft in place."
+    },
+    {
+      "name": "ghostfox",
+      "source": "./plugins/ghostfox",
+      "description": "A headless Firefox MCP for Claude, logged in wherever your everyday Firefox is (cookies and localStorage copied from your main profile)."
     }
   ]
 }
