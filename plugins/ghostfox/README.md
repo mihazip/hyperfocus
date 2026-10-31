@@ -28,9 +28,10 @@ geckodriver into `~/.ghostfox/bin`.
 
 ## How it works
 
-- Each Claude session claims its own agent profile in `~/.ghostfox/profiles/<n>`,
-  so parallel sessions don't fight over one Firefox.
-- On the first tool call, the moment Firefox launches, it syncs from your main
+- Sessions that never browse cost nothing: no profile, no Firefox. At the first
+  tool call a session claims its own agent profile in `~/.ghostfox/profiles/<n>`
+  (up to 8 at once), so parallel sessions don't fight over one Firefox.
+- At that first call, the moment Firefox launches, it syncs from your main
   profile (the one `profiles.ini` marks as default):
   - `cookies.sqlite`: every cookie is merged in. On a conflict your main
     profile wins, and logins the agent made itself are kept.

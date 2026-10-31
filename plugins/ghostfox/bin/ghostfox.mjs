@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // ghostfox: a headless Firefox for Claude that is logged in wherever your everyday Firefox is.
-// Wraps @mozilla/firefox-devtools-mcp. On start it claims a free agent profile; right before the
-// first tool call (when Firefox launches) it copies cookies and localStorage from your main profile
-// into it. Your main profile is only ever read.
+// Wraps @mozilla/firefox-devtools-mcp. At the first tool call (when Firefox launches) it claims a
+// free agent profile and copies cookies and localStorage from your main profile into it. Your main
+// profile is only ever read.
 //
 //   node ghostfox.mjs [extra firefox-devtools-mcp args]   run as an MCP server (stdio)
 //   node ghostfox.mjs sync                                 one sync into a free slot, for testing
@@ -297,39 +297,98 @@ function ensureGeckodriver(pkgDir) {
 }
 
 function mcpArgs(slot) {
-  const args = ['--profile-path', slot, '--viewport', '1280x900', '--pref', 'remote.prefs.recommended=false']
+  const args = ['--viewport', '1280x900', '--pref', 'remote.prefs.recommended=false']
+  if (slot) args.unshift('--profile-path', slot)
   if (process.env.GHOSTFOX_HEADLESS !== '0') args.unshift('--headless')
   if (process.env.GHOSTFOX_FIREFOX) args.push('--firefox-path', process.env.GHOSTFOX_FIREFOX)
   return [...args, ...process.argv.slice(2)]
 }
 
+function parse(line) {
+  try {
+    return JSON.parse(line)
+  } catch {
+    return undefined
+  }
+}
+
+// Starts firefox-devtools-mcp and relays its stdout, except replies to requests ghostfox sent itself
+function startMcp(entry, slot) {
+  const env = { ...process.env, PATH: `${join(HOME, 'bin')}${delimiter}${process.env.PATH}` }
+  const child = spawn(process.execPath, [entry, ...mcpArgs(slot)], { stdio: ['pipe', 'pipe', 'inherit'], env })
+  const own = new Map()
+  createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY }).on('line', (line) => {
+    const msg = parse(line)
+    const waiter = typeof msg?.id === 'string' && own.get(msg.id)
+    if (!waiter) return process.stdout.write(`${line}\n`)
+    own.delete(msg.id)
+    waiter(msg)
+  })
+  const send = (msg) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`)
+  const request = (id, method, params) =>
+    new Promise((resolve) => {
+      own.set(id, resolve)
+      send({ id, method, params })
+    })
+  return { child, send, request }
+}
+
 async function serve() {
   const entry = mcpEntry()
-  const slot = claimSlot()
-  log(`agent profile ${slot}`)
-  const env = { ...process.env, PATH: `${join(HOME, 'bin')}${delimiter}${process.env.PATH}` }
-  const child = spawn(process.execPath, [entry, ...mcpArgs(slot)], { stdio: ['pipe', 'inherit', 'inherit'], env })
-  const stop = () => child.kill()
+  // Most sessions never browse. The MCP answers initialize and tools/list without a profile, so a
+  // slot is claimed only at the first tool call, and the MCP is restarted on it then.
+  let mcp
+  let slot = null
+  let initParams
+  let synced = false
+  const use = (next) => {
+    mcp = next
+    // 'close' waits for stdout to drain; a replaced MCP's exit is ignored
+    next.child.on('close', (code) => {
+      if (mcp !== next) return
+      if (slot) releaseSlot(slot)
+      process.exit(code ?? 0)
+    })
+  }
+  use(startMcp(entry, null))
+  const stop = () => mcp.child.kill()
   process.on('SIGINT', stop)
   process.on('SIGTERM', stop)
-  child.on('exit', (code) => {
-    releaseSlot(slot)
-    process.exit(code ?? 0)
-  })
+
+  const attach = async () => {
+    slot = claimSlot()
+    log(`agent profile ${slot}`)
+    const old = mcp
+    use(startMcp(entry, slot))
+    old.child.stdin.end()
+    // the new MCP starts while the logins are copied; Firefox itself launches at the forwarded call
+    const [init] = await Promise.all([mcp.request('ghostfox-init', 'initialize', initParams), sync(slot)])
+    if (init.error) log(`MCP restart: initialize failed: ${init.error.message}`)
+    mcp.send({ method: 'notifications/initialized' })
+  }
 
   // Relay stdin line by line; the first tool call launches Firefox, so sync just before it
-  let synced = false
   let queue = Promise.resolve()
   const forward = async (line) => {
-    let msg
-    try {
-      msg = JSON.parse(line)
-    } catch {}
-    if (msg?.method === 'tools/call' && !synced) {
-      synced = true
-      await sync(slot)
+    const msg = parse(line)
+    if (msg?.method === 'initialize') initParams = msg.params
+    if (msg?.method === 'tools/call') {
+      if (!slot) {
+        try {
+          await attach()
+        } catch (e) {
+          slot = null
+          const result = { content: [{ type: 'text', text: `ghostfox: ${e.message}` }], isError: true }
+          process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n`)
+          return
+        }
+        synced = true
+      } else if (!synced) {
+        synced = true
+        await sync(slot)
+      }
     }
-    child.stdin.write(`${line}\n`)
+    mcp.child.stdin.write(`${line}\n`)
     // after Firefox is closed, the next call relaunches it: pick up fresh logins then
     if (msg?.method === 'tools/call' && msg.params?.name === 'close_firefox_session') synced = false
   }
@@ -338,7 +397,7 @@ async function serve() {
     queue = queue.then(() => forward(line))
   })
   rl.on('close', () => {
-    queue.then(() => child.stdin.end())
+    queue.then(() => mcp.child.stdin.end())
   })
 }
 
