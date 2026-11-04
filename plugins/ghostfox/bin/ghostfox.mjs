@@ -19,10 +19,7 @@ const MCP_VERSION = '0.10.7'
 const MAX_SLOTS = 8
 const WIN = process.platform === 'win32'
 const HOME = process.env.GHOSTFOX_HOME || join(homedir(), '.ghostfox')
-const SITES = (process.env.GHOSTFOX_SITES || '')
-  .split(',')
-  .map((s) => s.trim().toLowerCase().replace(/^\./, ''))
-  .filter(Boolean)
+const SITES_FILE = join(HOME, 'sites.txt')
 
 // node:sqlite still prints an ExperimentalWarning; keep stderr readable
 process.removeAllListeners('warning')
@@ -129,9 +126,24 @@ function prepareSlot(dir) {
 
 // ---------- sync ----------
 
-function matchesSite(host) {
+function parseSites(text) {
+  return text
+    .replace(/#.*$/gm, '')
+    .split(/[\s,]+/)
+    .map((s) => s.toLowerCase().replace(/^\*?\./, ''))
+    .filter(Boolean)
+}
+
+// The login limit, read again at each sync. null means no limit. GHOSTFOX_SITES wins over sites.txt.
+// A sites.txt without domains is a limit of no sites, not "all sites".
+function readSites() {
+  if (process.env.GHOSTFOX_SITES?.trim()) return parseSites(process.env.GHOSTFOX_SITES)
+  return existsSync(SITES_FILE) ? parseSites(readFileSync(SITES_FILE, 'utf8')) : null
+}
+
+function matchesSite(host, sites) {
   host = host.replace(/^\./, '').toLowerCase()
-  return !SITES.length || SITES.some((s) => host === s || host.endsWith(`.${s}`))
+  return !sites || sites.some((s) => host === s || host.endsWith(`.${s}`))
 }
 
 // Firefox holds its databases with an exclusive lock, so work on a copy; the -wal has the newest writes
@@ -143,7 +155,7 @@ function snapshot(dir, name, tmp) {
   return join(tmp, name)
 }
 
-async function syncCookies(src, dest, tmp) {
+async function syncCookies(src, dest, tmp, sites) {
   if (!existsSync(join(src, 'cookies.sqlite'))) return 0
   const { DatabaseSync } = await import('node:sqlite')
   const copy = snapshot(src, 'cookies.sqlite', tmp)
@@ -164,7 +176,7 @@ async function syncCookies(src, dest, tmp) {
     const names = (schema) => db.prepare(`PRAGMA ${schema}.table_info(moz_cookies)`).all().map((c) => c.name)
     const theirs = new Set(names('ff'))
     const cols = names('main').filter((c) => c !== 'id' && theirs.has(c)).join(', ')
-    const rows = db.prepare(`SELECT ${cols} FROM ff.moz_cookies`).all().filter((r) => matchesSite(r.host))
+    const rows = db.prepare(`SELECT ${cols} FROM ff.moz_cookies`).all().filter((r) => matchesSite(r.host, sites))
     const insert = db.prepare(`INSERT OR REPLACE INTO moz_cookies (${cols}) VALUES (${cols.replace(/\w+/g, '?')})`)
     const keys = cols.split(', ')
     db.exec('BEGIN')
@@ -191,7 +203,57 @@ function stamp(dir) {
     .join('|')
 }
 
-async function syncLocalStorage(src, dest) {
+// Make Firefox's quota manager rescan storage/ instead of trusting its cached origin list
+async function invalidateStorageCache(dest) {
+  if (!existsSync(join(dest, 'storage.sqlite'))) return
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(join(dest, 'storage.sqlite'))
+  try {
+    db.exec('UPDATE cache SET valid = 0')
+  } catch (e) {
+    log(`could not invalidate the storage cache: ${e.message}`)
+  } finally {
+    db.close()
+  }
+}
+
+// Sync only adds, so a narrower limit must also clear what earlier syncs and the agent left behind
+async function purgeCookies(dest, sites) {
+  const file = join(dest, 'cookies.sqlite')
+  if (!existsSync(file)) return 0
+  const { DatabaseSync } = await import('node:sqlite')
+  const db = new DatabaseSync(file)
+  try {
+    const hosts = db.prepare('SELECT DISTINCT host FROM moz_cookies').all().map((r) => r.host).filter((h) => !matchesSite(h, sites))
+    if (!hosts.length) return 0
+    const remove = db.prepare('DELETE FROM moz_cookies WHERE host = ?')
+    let removed = 0
+    db.exec('BEGIN')
+    for (const host of hosts) removed += Number(remove.run(host).changes)
+    db.exec('COMMIT')
+    // deleted rows otherwise stay readable in the file's free pages
+    db.exec('VACUUM')
+    return removed
+  } finally {
+    db.close()
+  }
+}
+
+// Removes whole origin folders: IndexedDB and caches the agent made can hold logins too
+async function purgeStorage(dest, sites) {
+  const root = join(dest, 'storage', 'default')
+  if (!existsSync(root)) return 0
+  let removed = 0
+  for (const origin of readdirSync(root)) {
+    if (!/^https?\+\+\+/.test(origin) || matchesSite(originHost(origin), sites)) continue
+    rmSync(join(root, origin), { recursive: true, force: true })
+    removed++
+  }
+  if (removed) await invalidateStorageCache(dest)
+  return removed
+}
+
+async function syncLocalStorage(src, dest, sites) {
   const from = join(src, 'storage', 'default')
   const to = join(dest, 'storage', 'default')
   if (!existsSync(from)) return 0
@@ -200,7 +262,7 @@ async function syncLocalStorage(src, dest) {
   let copied = 0
   for (const origin of readdirSync(from)) {
     // web origins only: extension storage and chrome:// belong to the main profile's add-ons
-    if (!/^https?\+\+\+/.test(origin) || !matchesSite(originHost(origin))) continue
+    if (!/^https?\+\+\+/.test(origin) || !matchesSite(originHost(origin), sites)) continue
     const ls = join(from, origin, 'ls')
     if (!existsSync(join(ls, 'data.sqlite'))) continue
     let current
@@ -224,22 +286,22 @@ async function syncLocalStorage(src, dest) {
     }
   }
   writeFileSync(manifestFile, JSON.stringify(manifest))
-  if (copied && existsSync(join(dest, 'storage.sqlite'))) {
-    // make Firefox's quota manager rescan storage/ instead of trusting its cached origin list
-    const { DatabaseSync } = await import('node:sqlite')
-    const db = new DatabaseSync(join(dest, 'storage.sqlite'))
-    try {
-      db.exec('UPDATE cache SET valid = 0')
-    } catch (e) {
-      log(`could not invalidate the storage cache: ${e.message}`)
-    } finally {
-      db.close()
-    }
-  }
+  if (copied) await invalidateStorageCache(dest)
   return copied
 }
 
+// Throws if a limit is set and cannot be applied: Firefox must not launch with logins outside it
 async function sync(dest) {
+  const sites = readSites()
+  if (sites) {
+    try {
+      const cookies = await purgeCookies(dest, sites)
+      const origins = await purgeStorage(dest, sites)
+      if (cookies || origins) log(`removed ${cookies} cookies and ${origins} storage origins outside the login limit`)
+    } catch (e) {
+      throw new Error(`could not apply the login limit to ${dest}, so Firefox did not start. A Firefox process may still hold this profile. ${e.message}`)
+    }
+  }
   const src = sourceProfile()
   if (!src || !existsSync(src)) {
     log('no Firefox profile found to copy from (set GHOSTFOX_SOURCE_PROFILE); starting logged out')
@@ -248,9 +310,9 @@ async function sync(dest) {
   const started = Date.now()
   const tmp = mkdtempSync(join(tmpdir(), 'ghostfox-'))
   try {
-    const cookies = await syncCookies(src, dest, tmp)
-    const ls = await syncLocalStorage(src, dest)
-    const scope = SITES.length ? ` for ${SITES.join(', ')}` : ''
+    const cookies = await syncCookies(src, dest, tmp, sites)
+    const ls = await syncLocalStorage(src, dest, sites)
+    const scope = sites ? ` for ${sites.join(', ') || 'no sites'}` : ''
     log(`synced ${cookies} cookies and ${ls} localStorage origins${scope} from ${src} in ${Date.now() - started} ms`)
   } catch (e) {
     log(`sync failed, using the logins already in the agent profile: ${e.message}`)
@@ -362,9 +424,10 @@ async function serve() {
     use(startMcp(entry, slot))
     old.child.stdin.end()
     // the new MCP starts while the logins are copied; Firefox itself launches at the forwarded call
-    const [init] = await Promise.all([mcp.request('ghostfox-init', 'initialize', initParams), sync(slot)])
-    if (init.error) log(`MCP restart: initialize failed: ${init.error.message}`)
+    const [init, copied] = await Promise.allSettled([mcp.request('ghostfox-init', 'initialize', initParams), sync(slot)])
+    if (init.value.error) log(`MCP restart: initialize failed: ${init.value.error.message}`)
     mcp.send({ method: 'notifications/initialized' })
+    if (copied.status === 'rejected') throw copied.reason
   }
 
   // Relay stdin line by line; the first tool call launches Firefox, so sync just before it
@@ -372,20 +435,16 @@ async function serve() {
   const forward = async (line) => {
     const msg = parse(line)
     if (msg?.method === 'initialize') initParams = msg.params
-    if (msg?.method === 'tools/call') {
-      if (!slot) {
-        try {
-          await attach()
-        } catch (e) {
-          slot = null
-          const result = { content: [{ type: 'text', text: `ghostfox: ${e.message}` }], isError: true }
-          process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n`)
-          return
-        }
+    if (msg?.method === 'tools/call' && !synced) {
+      try {
+        if (slot) await sync(slot)
+        else await attach()
         synced = true
-      } else if (!synced) {
-        synced = true
-        await sync(slot)
+      } catch (e) {
+        // the call is not forwarded, so Firefox stays down and the next call tries again
+        const result = { content: [{ type: 'text', text: `ghostfox: ${e.message}` }], isError: true }
+        process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result })}\n`)
+        return
       }
     }
     mcp.child.stdin.write(`${line}\n`)
@@ -403,8 +462,11 @@ async function serve() {
 
 if (process.argv[2] === 'sync') {
   const slot = claimSlot()
-  await sync(slot)
-  releaseSlot(slot)
+  try {
+    await sync(slot)
+  } finally {
+    releaseSlot(slot)
+  }
   log(`done: ${slot}`)
 } else {
   await serve()

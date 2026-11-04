@@ -41,11 +41,42 @@ geckodriver into `~/.ghostfox/bin`.
 - Calling `close_firefox_session` and then any other tool relaunches Firefox
   with fresh logins.
 
+## Limit the logins
+
+By default, every login is copied. To allow only some sites, write them in
+`~/.ghostfox/sites.txt`, one domain per line. Subdomains count, and `#` starts
+a comment:
+
+```
+github.com
+youtube.com
+```
+
+Ghostfox reads this file at each sync. To change the limit in a running session:
+
+1. Edit the file.
+2. Ask Claude to call `close_firefox_session`.
+3. Use any browser tool. Firefox starts again with the new limit.
+
+You do not need to restart Claude Code. A running Firefox keeps its logins until
+it closes.
+
+- The limit is exact. Nothing guesses which sites a task needs. A site that signs
+  in through another domain, such as Google, needs that domain in the list too.
+- Each sync removes cookies and site storage outside the limit from the agent
+  profile. This includes logins that the agent made itself.
+- A file with no domains means no logins. Delete the file to copy everything.
+- If the limit cannot be applied, Firefox does not start and the tool call
+  returns an error. The usual cause is an old Firefox process that holds the
+  profile. Stop that process and try again.
+- Edit this file yourself. Claude's file tools can also write to it, so a
+  permission rule is the only way to stop that.
+
 ## Settings (environment variables)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GHOSTFOX_SITES` | all | Comma list of domains whose logins get copied, e.g. `github.com,youtube.com`. Subdomains count. |
+| `GHOSTFOX_SITES` | not set | Comma list of domains, e.g. `github.com,youtube.com`. If set, it replaces `sites.txt`. It is read when Claude Code starts, so a change needs a restart. |
 | `GHOSTFOX_SOURCE_PROFILE` | from `profiles.ini` | Path of the Firefox profile to copy from. |
 | `GHOSTFOX_HEADLESS` | `1` | `0` shows the agent's Firefox window, for debugging. |
 | `GHOSTFOX_FIREFOX` | auto-detected | Path to `firefox.exe` / `firefox`. |
@@ -58,9 +89,8 @@ e.g. `--tool-preset slim` to drop `evaluate_script`.
 
 - **Your sessions, Claude's hands.** With the default settings the agent can act
   as you on every site you are logged in to. Text on any page it reads can try
-  to steer it (prompt injection). Use `GHOSTFOX_SITES` to hand over only the
-  logins a task needs. It limits which logins are copied, not where the agent
-  can browse.
+  to steer it (prompt injection). Use `sites.txt` to hand over only the logins a
+  task needs. It limits which logins the agent has, not where it can browse.
 - `~/.ghostfox/profiles` holds copies of your cookies. Treat it like your
   Firefox profile.
 - Some sites (Google, banks) may notice the same session used from a second
