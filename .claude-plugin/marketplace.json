@@ -21,7 +21,7 @@
     {
       "name": "ghostfox",
       "source": "./plugins/ghostfox",
-      "description": "A headless Firefox MCP for Claude, logged in wherever your everyday Firefox is (cookies and localStorage copied from your main profile)."
+      "description": "A headless Firefox MCP for Claude. It starts logged out; /ghostfox:logins <sites> gives it your Firefox logins for those sites, for one session."
     }
   ]
 }

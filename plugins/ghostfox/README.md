@@ -1,13 +1,15 @@
 # ghostfox
 
-A headless Firefox for Claude that is logged in wherever your everyday Firefox
-is. No window and no extension. It runs only while Claude is using it, and
-your own Firefox can stay open the whole time.
+A headless Firefox for Claude that can use the logins of your everyday Firefox,
+but only for the sites that you allow in a session. No window and no
+extension. It runs only while Claude is using it, and your own Firefox can stay
+open the whole time.
 
 It wraps Mozilla's [firefox-devtools-mcp](https://github.com/mozilla/firefox-devtools-mcp).
-Before Firefox launches, ghostfox copies the cookies and localStorage of your
-main Firefox profile into a separate agent profile. Your main profile is only
-read, never written.
+A session starts logged out everywhere. When you type
+`/ghostfox:logins github.com`, ghostfox copies the cookies and localStorage of
+that site from your main Firefox profile into a separate agent profile. Your
+main profile is only read, never written.
 
 ## Install
 
@@ -31,52 +33,55 @@ geckodriver into `~/.ghostfox/bin`.
 - Sessions that never browse cost nothing: no profile, no Firefox. At the first
   tool call a session claims its own agent profile in `~/.ghostfox/profiles/<n>`
   (up to 8 at once), so parallel sessions don't fight over one Firefox.
-- At that first call, the moment Firefox launches, it syncs from your main
+- A session starts with **no logins**. You give it logins with `/ghostfox:logins`
+  (see below). Each tool call checks the grant again.
+- When Firefox launches, ghostfox syncs the granted sites from your main
   profile (the one `profiles.ini` marks as default):
-  - `cookies.sqlite`: every cookie is merged in. On a conflict your main
-    profile wins, and logins the agent made itself are kept.
-  - `storage/default/<origin>/ls`: localStorage of every web origin, copied
-    again only when it changed. IndexedDB and extension storage are not copied.
-- The first sync takes about 10 s for a big profile, later ones under a second.
+  - `cookies.sqlite`: the cookies of the granted sites. On a conflict your main
+    profile wins.
+  - `storage/default/<origin>/ls`: localStorage of the granted web origins,
+    copied again only when it changed. IndexedDB and extension storage are not
+    copied.
+- Before each sync, ghostfox removes the cookies and site storage of all other
+  sites from the agent profile. This includes logins that the agent made itself.
+- The first result after each launch tells Claude in plain words which logins
+  the browser has, so Claude can tell you.
 - Calling `close_firefox_session` and then any other tool relaunches Firefox
   with fresh logins.
 
-## Limit the logins
+## Give logins to a session
 
-By default, every login is copied. To allow only some sites, write them in
-`~/.ghostfox/sites.txt`, one domain per line. Subdomains count, and `#` starts
-a comment:
+Type the command yourself. Claude cannot run it (`disable-model-invocation`).
 
 ```
-github.com
-youtube.com
+/ghostfox:logins github.com dash.cloudflare.com
+/ghostfox:logins            # show the logins of this session
+/ghostfox:logins off        # remove them
 ```
 
-Ghostfox reads this file at each sync. To change the limit in a running session:
+The command answers in plain words, for example: "This Claude Code session can
+use your Firefox logins for github.com and dash.cloudflare.com (with
+subdomains). Every other site opens logged out."
 
-1. Edit the file.
-2. Ask Claude to call `close_firefox_session`.
-3. Use any browser tool. Firefox starts again with the new limit.
-
-You do not need to restart Claude Code. A running Firefox keeps its logins until
-it closes.
-
-- The limit is exact. Nothing guesses which sites a task needs. A site that signs
-  in through another domain, such as Google, needs that domain in the list too.
-- Each sync removes cookies and site storage outside the limit from the agent
-  profile. This includes logins that the agent made itself.
-- A file with no domains means no logins. Delete the file to copy everything.
-- If the limit cannot be applied, Firefox does not start and the tool call
+- The grant belongs to one Claude Code process (`$CLAUDE_PID`), and is stored in
+  `~/.ghostfox/grants/<pid>.txt`. Other sessions do not get it.
+- A new list replaces the old list. If the agent browser is open, it restarts at
+  the next browser call, and its open pages close.
+- The grant ends when the Claude Code session ends. An MCP restart (for example
+  `/reload-plugins`) also clears it. Then type the command again.
+- Subdomains count. You can paste a URL: `https://www.github.com/x` becomes
+  `github.com`. A site that signs in through another domain, such as Google,
+  needs that domain too.
+- The grant limits which logins the agent has, not where it can browse.
+- If the grant cannot be applied, Firefox does not start and the tool call
   returns an error. The usual cause is an old Firefox process that holds the
   profile. Stop that process and try again.
-- Edit this file yourself. Claude's file tools can also write to it, so a
-  permission rule is the only way to stop that.
 
 ## Settings (environment variables)
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `GHOSTFOX_SITES` | not set | Comma list of domains, e.g. `github.com,youtube.com`. If set, it replaces `sites.txt`. It is read when Claude Code starts, so a change needs a restart. |
+| `GHOSTFOX_SITES` | not set | Comma list of domains that every session gets without `/ghostfox:logins`, for example for `claude -p`. A grant replaces it. A change needs a restart. |
 | `GHOSTFOX_SOURCE_PROFILE` | from `profiles.ini` | Path of the Firefox profile to copy from. |
 | `GHOSTFOX_HEADLESS` | `1` | `0` shows the agent's Firefox window, for debugging. |
 | `GHOSTFOX_FIREFOX` | auto-detected | Path to `firefox.exe` / `firefox`. |
@@ -87,10 +92,15 @@ e.g. `--tool-preset slim` to drop `evaluate_script`.
 
 ## Be aware
 
-- **Your sessions, Claude's hands.** With the default settings the agent can act
-  as you on every site you are logged in to. Text on any page it reads can try
-  to steer it (prompt injection). Use `sites.txt` to hand over only the logins a
-  task needs. It limits which logins the agent has, not where it can browse.
+- **Your sessions, Claude's hands.** On a granted site the agent can act as you.
+  Text on any page it reads can try to steer it (prompt injection). Give only
+  the logins a task needs. Do not give email, bank or password-manager logins:
+  a session there opens all your other accounts.
+- **The grant is a guard, not a wall.** It stops Claude from using your logins
+  on its own initiative, or because a web page tells it to. It does not stop an
+  agent that is set on getting around it: any agent with shell access runs as
+  your user and can read your Firefox profile directly. Keep your Claude Code
+  permission prompts on for that.
 - `~/.ghostfox/profiles` holds copies of your cookies. Treat it like your
   Firefox profile.
 - Some sites (Google, banks) may notice the same session used from a second

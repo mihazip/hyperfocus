@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// ghostfox: a headless Firefox for Claude that is logged in wherever your everyday Firefox is.
+// ghostfox: a headless Firefox for Claude that can use the logins of your everyday Firefox.
 // Wraps @mozilla/firefox-devtools-mcp. At the first tool call (when Firefox launches) it claims a
-// free agent profile and copies cookies and localStorage from your main profile into it. Your main
-// profile is only ever read.
+// free agent profile and copies cookies and localStorage from your main profile into it, but only
+// for the sites that the user allowed for this Claude Code session (/ghostfox:logins). With no
+// grant, the agent browser has no logins. Your main profile is only ever read.
 //
 //   node ghostfox.mjs [extra firefox-devtools-mcp args]   run as an MCP server (stdio)
+//   node ghostfox.mjs grant [sites... | off]              set or show the grant of $CLAUDE_PID
 //   node ghostfox.mjs sync                                 one sync into a free slot, for testing
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -19,7 +21,7 @@ const MCP_VERSION = '0.10.7'
 const MAX_SLOTS = 8
 const WIN = process.platform === 'win32'
 const HOME = process.env.GHOSTFOX_HOME || join(homedir(), '.ghostfox')
-const SITES_FILE = join(HOME, 'sites.txt')
+const GRANTS = join(HOME, 'grants')
 
 // node:sqlite still prints an ExperimentalWarning; keep stderr readable
 process.removeAllListeners('warning')
@@ -126,24 +128,95 @@ function prepareSlot(dir) {
 
 // ---------- sync ----------
 
+// Accepts what people paste: "GitHub.com", "https://www.github.com/x", "*.github.com"
 function parseSites(text) {
   return text
     .replace(/#.*$/gm, '')
     .split(/[\s,]+/)
-    .map((s) => s.toLowerCase().replace(/^\*?\./, ''))
+    .map((s) =>
+      s
+        .toLowerCase()
+        .replace(/^[a-z]+:\/\//, '')
+        .split(/[/?#:]/)[0]
+        .replace(/^\*?\./, '')
+        .replace(/^www\./, ''),
+    )
     .filter(Boolean)
 }
 
-// The login limit, read again at each sync. null means no limit. GHOSTFOX_SITES wins over sites.txt.
-// A sites.txt without domains is a limit of no sites, not "all sites".
-function readSites() {
-  if (process.env.GHOSTFOX_SITES?.trim()) return parseSites(process.env.GHOSTFOX_SITES)
-  return existsSync(SITES_FILE) ? parseSites(readFileSync(SITES_FILE, 'utf8')) : null
+// ---------- grants ----------
+
+// A grant belongs to one Claude Code process. The MCP server is its direct child (process.ppid),
+// and the shell of a skill sees it as $CLAUDE_PID. GHOSTFOX_OWNER_PID overrides both, for tests.
+function ownerPid(fallback) {
+  return Number(process.env.GHOSTFOX_OWNER_PID || fallback) || 0
+}
+
+function grantFile(pid) {
+  return join(GRANTS, `${pid}.txt`)
+}
+
+function readGrant(pid) {
+  return existsSync(grantFile(pid)) ? parseSites(readFileSync(grantFile(pid), 'utf8')) : null
+}
+
+// The logins of a session: its grant, else GHOSTFOX_SITES, else none. Read again at each call.
+function readSites(pid) {
+  return readGrant(pid) ?? parseSites(process.env.GHOSTFOX_SITES ?? '')
+}
+
+// A dead process can't use its grant, and a new process with a reused pid must not inherit it
+function pruneGrants(keep) {
+  if (!existsSync(GRANTS)) return
+  for (const f of readdirSync(GRANTS)) {
+    const pid = Number(f.replace(/\.txt$/, ''))
+    if (pid !== keep && (!pid || !alive(pid))) rmSync(join(GRANTS, f), { force: true })
+  }
+}
+
+function siteList(sites) {
+  if (sites.length < 2) return sites.join('')
+  return `${sites.slice(0, -1).join(', ')} and ${sites.at(-1)}`
+}
+
+function describe(sites) {
+  if (!sites.length) return 'This Claude Code session has no Firefox logins. Every site opens logged out.'
+  return `This Claude Code session can use your Firefox logins for ${siteList(sites)} (with subdomains). Every other site opens logged out.`
+}
+
+const DOMAIN = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/
+
+// node ghostfox.mjs grant [sites... | off]: the /ghostfox:logins skill runs it in the user's turn
+function grant(args) {
+  const pid = ownerPid(process.env.CLAUDE_PID)
+  if (!pid) {
+    console.log('ghostfox: no Claude Code session found ($CLAUDE_PID is not set). Use /ghostfox:logins inside Claude Code.')
+    process.exit(1)
+  }
+  pruneGrants(pid)
+  const sites = parseSites(args.join(' '))
+  if (sites.length === 1 && ['off', 'none', 'clear'].includes(sites[0])) {
+    rmSync(grantFile(pid), { force: true })
+  } else if (sites.length) {
+    const bad = sites.filter((s) => !DOMAIN.test(s))
+    if (bad.length) {
+      console.log(`ghostfox: not a domain: ${bad.join(', ')}. Nothing changed. Example: /ghostfox:logins github.com dash.cloudflare.com`)
+      process.exit(1)
+    }
+    mkdirSync(GRANTS, { recursive: true })
+    writeFileSync(grantFile(pid), `${[...new Set(sites)].join('\n')}\n`)
+  }
+  const now = readSites(pid)
+  const lines = [`ghostfox: ${describe(now)}`]
+  if (!existsSync(grantFile(pid)) && now.length) lines.push('These sites come from GHOSTFOX_SITES. A /ghostfox:logins list replaces them for this session.')
+  if (sites.length) lines.push('If the agent browser is open, it restarts with the new logins at the next browser call, and its open pages close.')
+  if (existsSync(grantFile(pid))) lines.push('The grant ends when this Claude Code session ends. To remove it now: /ghostfox:logins off')
+  console.log(lines.join('\n'))
 }
 
 function matchesSite(host, sites) {
   host = host.replace(/^\./, '').toLowerCase()
-  return !sites || sites.some((s) => host === s || host.endsWith(`.${s}`))
+  return sites.some((s) => host === s || host.endsWith(`.${s}`))
 }
 
 // Firefox holds its databases with an exclusive lock, so work on a copy; the -wal has the newest writes
@@ -290,17 +363,18 @@ async function syncLocalStorage(src, dest, sites) {
   return copied
 }
 
-// Throws if a limit is set and cannot be applied: Firefox must not launch with logins outside it
-async function sync(dest) {
-  const sites = readSites()
-  if (sites) {
-    try {
-      const cookies = await purgeCookies(dest, sites)
-      const origins = await purgeStorage(dest, sites)
-      if (cookies || origins) log(`removed ${cookies} cookies and ${origins} storage origins outside the login limit`)
-    } catch (e) {
-      throw new Error(`could not apply the login limit to ${dest}, so Firefox did not start. A Firefox process may still hold this profile. ${e.message}`)
-    }
+// Throws if the grant cannot be applied: Firefox must not launch with logins outside it
+async function sync(dest, sites) {
+  try {
+    const cookies = await purgeCookies(dest, sites)
+    const origins = await purgeStorage(dest, sites)
+    if (cookies || origins) log(`removed ${cookies} cookies and ${origins} storage origins outside the grant`)
+  } catch (e) {
+    throw new Error(`could not apply the login grant to ${dest}, so Firefox did not start. A Firefox process may still hold this profile. ${e.message}`)
+  }
+  if (!sites.length) {
+    log('no logins granted for this session; Firefox starts logged out')
+    return
   }
   const src = sourceProfile()
   if (!src || !existsSync(src)) {
@@ -312,8 +386,7 @@ async function sync(dest) {
   try {
     const cookies = await syncCookies(src, dest, tmp, sites)
     const ls = await syncLocalStorage(src, dest, sites)
-    const scope = sites ? ` for ${sites.join(', ') || 'no sites'}` : ''
-    log(`synced ${cookies} cookies and ${ls} localStorage origins${scope} from ${src} in ${Date.now() - started} ms`)
+    log(`synced ${cookies} cookies and ${ls} localStorage origins for ${sites.join(', ')} from ${src} in ${Date.now() - started} ms`)
   } catch (e) {
     log(`sync failed, using the logins already in the agent profile: ${e.message}`)
   } finally {
@@ -374,17 +447,26 @@ function parse(line) {
   }
 }
 
-// Starts firefox-devtools-mcp and relays its stdout, except replies to requests ghostfox sent itself
-function startMcp(entry, slot) {
+// Starts firefox-devtools-mcp and relays its stdout, except replies to requests ghostfox sent itself.
+// A note set for a call id is added to that call's result as one more text item.
+function startMcp(entry, slot, notes) {
   const env = { ...process.env, PATH: `${join(HOME, 'bin')}${delimiter}${process.env.PATH}` }
   const child = spawn(process.execPath, [entry, ...mcpArgs(slot)], { stdio: ['pipe', 'pipe', 'inherit'], env })
   const own = new Map()
   createInterface({ input: child.stdout, crlfDelay: Number.POSITIVE_INFINITY }).on('line', (line) => {
     const msg = parse(line)
     const waiter = typeof msg?.id === 'string' && own.get(msg.id)
-    if (!waiter) return process.stdout.write(`${line}\n`)
-    own.delete(msg.id)
-    waiter(msg)
+    if (waiter) {
+      own.delete(msg.id)
+      return waiter(msg)
+    }
+    const note = msg?.id !== undefined && notes.get(msg.id)
+    if (note && Array.isArray(msg.result?.content)) {
+      notes.delete(msg.id)
+      msg.result.content.push({ type: 'text', text: note })
+      return process.stdout.write(`${JSON.stringify(msg)}\n`)
+    }
+    process.stdout.write(`${line}\n`)
   })
   const send = (msg) => child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', ...msg })}\n`)
   const request = (id, method, params) =>
@@ -395,14 +477,30 @@ function startMcp(entry, slot) {
   return { child, send, request }
 }
 
+// Tells the agent, at each Firefox launch, which logins it has, so it can tell the user
+function loginNote(sites) {
+  const ask = 'Only the user can change this, with /ghostfox:logins <domains>. Do not change it yourself.'
+  if (!sites.length) return `ghostfox: this browser has no logins, so every site is logged out. If a task needs a login, ask the user to run /ghostfox:logins <domain>. Do not change this yourself.`
+  return `ghostfox: this browser has the user's logins for ${siteList(sites)} only (with subdomains). Every other site is logged out. ${ask}`
+}
+
 async function serve() {
+  const owner = ownerPid(process.ppid)
+  // A new MCP server starts without a grant: an old file with this pid is from a dead process,
+  // or from before an MCP restart. The user runs /ghostfox:logins again then.
+  if (owner) rmSync(grantFile(owner), { force: true })
+  pruneGrants(owner)
   const entry = mcpEntry()
   // Most sessions never browse. The MCP answers initialize and tools/list without a profile, so a
   // slot is claimed only at the first tool call, and the MCP is restarted on it then.
+  const notes = new Map()
   let mcp
   let slot = null
   let initParams
   let synced = false
+  // the grant that the running Firefox has, as one string
+  let syncedSites = ''
+  let closes = 0
   const use = (next) => {
     mcp = next
     // 'close' waits for stdout to drain; a replaced MCP's exit is ignored
@@ -412,19 +510,19 @@ async function serve() {
       process.exit(code ?? 0)
     })
   }
-  use(startMcp(entry, null))
+  use(startMcp(entry, null, notes))
   const stop = () => mcp.child.kill()
   process.on('SIGINT', stop)
   process.on('SIGTERM', stop)
 
-  const attach = async () => {
+  const attach = async (sites) => {
     slot = claimSlot()
     log(`agent profile ${slot}`)
     const old = mcp
-    use(startMcp(entry, slot))
+    use(startMcp(entry, slot, notes))
     old.child.stdin.end()
     // the new MCP starts while the logins are copied; Firefox itself launches at the forwarded call
-    const [init, copied] = await Promise.allSettled([mcp.request('ghostfox-init', 'initialize', initParams), sync(slot)])
+    const [init, copied] = await Promise.allSettled([mcp.request('ghostfox-init', 'initialize', initParams), sync(slot, sites)])
     if (init.value.error) log(`MCP restart: initialize failed: ${init.value.error.message}`)
     mcp.send({ method: 'notifications/initialized' })
     if (copied.status === 'rejected') throw copied.reason
@@ -435,11 +533,20 @@ async function serve() {
   const forward = async (line) => {
     const msg = parse(line)
     if (msg?.method === 'initialize') initParams = msg.params
-    if (msg?.method === 'tools/call' && !synced) {
+    const sites = msg?.method === 'tools/call' ? readSites(owner) : null
+    if (sites && synced && sites.join(',') !== syncedSites) {
+      // the user changed the grant: Firefox holds its profile, so close it before the new sync
+      log(`grant changed to ${sites.join(', ') || 'no sites'}; restarting Firefox`)
+      await mcp.request(`ghostfox-close-${++closes}`, 'tools/call', { name: 'close_firefox_session', arguments: {} })
+      synced = false
+    }
+    if (sites && !synced) {
       try {
-        if (slot) await sync(slot)
-        else await attach()
+        if (slot) await sync(slot, sites)
+        else await attach(sites)
         synced = true
+        syncedSites = sites.join(',')
+        notes.set(msg.id, loginNote(sites))
       } catch (e) {
         // the call is not forwarded, so Firefox stays down and the next call tries again
         const result = { content: [{ type: 'text', text: `ghostfox: ${e.message}` }], isError: true }
@@ -460,10 +567,12 @@ async function serve() {
   })
 }
 
-if (process.argv[2] === 'sync') {
+if (process.argv[2] === 'grant') {
+  grant(process.argv.slice(3))
+} else if (process.argv[2] === 'sync') {
   const slot = claimSlot()
   try {
-    await sync(slot)
+    await sync(slot, readSites(ownerPid(process.ppid)))
   } finally {
     releaseSlot(slot)
   }
