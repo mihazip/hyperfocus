@@ -11,7 +11,7 @@ your train of thought stay where they were.
 | --- | --- |
 | [aside](plugins/aside) | `/aside` opens a side pane with its own input box. Ask Haiku anything; optionally send a short synopsis back to your prompt. |
 | [tangent](plugins/tangent) | Type a question between pipes mid-sentence (`|| like this ||`; `\\\` and `///` work too). A space after the closing pipes asks in the background and writes the answer into your draft in place. |
-| [ghostfox](plugins/ghostfox) | A headless Firefox for Claude, logged in wherever your everyday Firefox is. It copies your main profile's cookies and localStorage into an agent profile before each launch, with no window and no extension. |
+| [ghostfox](plugins/ghostfox) | A headless Firefox for Claude, with no window and no extension. It starts logged out. `/ghostfox:logins <sites>` copies the cookies and localStorage of those sites from your everyday Firefox, for one session. |
 
 ## Install
 

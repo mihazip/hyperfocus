@@ -1,7 +1,7 @@
 {
   "name": "ghostfox",
-  "version": "0.2.0",
-  "description": "A headless Firefox for Claude, logged in wherever your everyday Firefox is: cookies and localStorage are copied from your main profile into an agent profile before each launch.",
+  "version": "0.3.0",
+  "description": "A headless Firefox for Claude that can use your everyday Firefox logins, only for the sites you allow in a session with /ghostfox:logins.",
   "author": {
     "name": "mihazip",
     "url": "https://github.com/mihazip"
