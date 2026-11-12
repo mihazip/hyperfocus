@@ -56,4 +56,6 @@ times (`↻`). Below 80 columns it drops the chart.
 
 The forecast is a fork of Token Weather from
 [anthropics/claude-code-playground](https://github.com/anthropics/claude-code-playground)
-(Copyright 2026 Anthropic PBC, Apache-2.0). This mod has the same license.
+(Copyright 2026 Anthropic PBC, Apache-2.0). This mod has the same license: see
+[LICENSE](LICENSE). The changes to the original are the account limits, the
+reset times, the `session.measure` hook, the state in atoms and the colors.

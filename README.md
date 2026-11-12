@@ -30,4 +30,4 @@ Restart Claude Code after installing.
 
 ## License
 
-MIT
+MIT, except [usage-weather](plugins/usage-weather), which is Apache-2.0.
