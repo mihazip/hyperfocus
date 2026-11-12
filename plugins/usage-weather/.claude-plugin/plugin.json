@@ -1,0 +1,20 @@
+{
+  "name": "usage-weather",
+  "version": "0.1.0",
+  "description": "One line above the prompt: a weather forecast of the context window, and the 5-hour, weekly and spend limits of the account.",
+  "author": {
+    "name": "mihazip",
+    "url": "https://github.com/mihazip"
+  },
+  "homepage": "https://github.com/mihazip/hyperfocus",
+  "repository": "https://github.com/mihazip/hyperfocus",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mod",
+    "band",
+    "usage",
+    "rate-limit",
+    "context"
+  ],
+  "types": "./types/index.d.ts"
+}
