@@ -12,6 +12,7 @@ your train of thought stay where they were.
 | [aside](plugins/aside) | `/aside` opens a side pane with its own input box. Ask Haiku anything; optionally send a short synopsis back to your prompt. |
 | [tangent](plugins/tangent) | Type a question between pipes mid-sentence (`|| like this ||`; `\\\` and `///` work too). A space after the closing pipes asks in the background and writes the answer into your draft in place. |
 | [ghostfox](plugins/ghostfox) | A headless Firefox for Claude, with no window and no extension. It starts logged out. `/ghostfox:logins <sites>` copies the cookies and localStorage of those sites from your everyday Firefox, for one session. |
+| [usage-weather](plugins/usage-weather) | One line above the prompt: a weather forecast of the context window, and the 5-hour, weekly and spend limits of your account. |
 
 ## Install
 
@@ -22,6 +23,7 @@ Inside Claude Code:
 /plugin install aside@hyperfocus
 /plugin install tangent@hyperfocus
 /plugin install ghostfox@hyperfocus
+/plugin install usage-weather@hyperfocus
 ```
 
 Restart Claude Code after installing.

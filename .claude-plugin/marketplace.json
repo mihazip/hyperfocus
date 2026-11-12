@@ -22,6 +22,11 @@
       "name": "ghostfox",
       "source": "./plugins/ghostfox",
       "description": "A headless Firefox MCP for Claude. It starts logged out; /ghostfox:logins <sites> gives it your Firefox logins for those sites, for one session."
+    },
+    {
+      "name": "usage-weather",
+      "source": "./plugins/usage-weather",
+      "description": "One line above the prompt: a weather forecast of the context window, and the 5-hour, weekly and spend limits of the account."
     }
   ]
 }
